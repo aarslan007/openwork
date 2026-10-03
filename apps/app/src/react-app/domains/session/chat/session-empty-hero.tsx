@@ -206,7 +206,7 @@ export function SessionEmptyHero(props: SessionEmptyHeroProps) {
     <div data-chat-empty-hero className="mx-auto flex w-full max-w-[640px] flex-col gap-6 px-4 max-lg:h-full max-lg:min-h-0 max-lg:gap-4 max-lg:overflow-y-auto max-lg:px-3 max-lg:pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:px-6">
       <div data-empty-greeting hidden={hideIntroduction} className="text-center max-lg:pt-6">
         <h2 className="text-lg font-medium tracking-tight text-foreground">
-          What do you need done?
+          What do you need done? (world check musr0s2s)
         </h2>
       </div>
 
