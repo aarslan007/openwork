@@ -18,12 +18,13 @@ import { createManagedOpencodeServer } from "../../apps/server/src/managed-openc
  * OpenWork spawns the engine with, not how the engine reads it.
  */
 
-type FakeEngineMode = "foreign" | "healthy" | "unrelated-failure";
+type FakeEngineMode = "foreign" | "healthy" | "unrelated-failure" | "foreign-then-port";
 
 type SpawnRecord = {
   OPENCODE_DB?: string;
   OPENCODE_CONFIG_DIR?: string;
   XDG_CONFIG_HOME?: string;
+  PORT?: string;
 };
 
 const FOREIGN_STORAGE_STDERR =
@@ -51,21 +52,41 @@ async function freePort(): Promise<number> {
 /**
  * A stand-in engine. `foreign` refuses to boot unless it was handed private
  * storage, which is exactly the choice the recovery retry has to make.
+ *
+ * `foreign-then-port` walks the two recovery classes in sequence: the first
+ * spawn collides with the shared store, the second has private storage but
+ * loses the race for its port, and only the third succeeds. It reads the
+ * spawn log to tell which attempt it is.
  */
 function fakeEngineSource(): string {
   return `#!/usr/bin/env node
-const { appendFileSync } = require("node:fs");
+const { appendFileSync, readFileSync } = require("node:fs");
 const record = {
   OPENCODE_DB: process.env.OPENCODE_DB,
   OPENCODE_CONFIG_DIR: process.env.OPENCODE_CONFIG_DIR,
   XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  PORT: process.argv[process.argv.indexOf("--port") + 1],
 };
+let prior = 0;
+try {
+  prior = readFileSync(process.env.FAKE_ENGINE_LOG, "utf8").split("\\n").filter(Boolean).length;
+} catch {}
 appendFileSync(process.env.FAKE_ENGINE_LOG, JSON.stringify(record) + "\\n");
 const mode = process.env.FAKE_ENGINE_MODE;
 const isolated = typeof process.env.OPENCODE_DB === "string" && process.env.OPENCODE_DB !== "";
 if (mode === "unrelated-failure") {
   process.stderr.write("Error: Unexpected error\\n\\nsome unrelated startup failure\\n");
   process.exit(1);
+}
+if (mode === "foreign-then-port") {
+  if (prior === 0) {
+    process.stderr.write(process.env.FAKE_ENGINE_STDERR + "\\n");
+    process.exit(1);
+  }
+  if (prior === 1) {
+    process.stderr.write("Error: listen EADDRINUSE 127.0.0.1:" + record.PORT + "\\n");
+    process.exit(1);
+  }
 }
 if (mode === "foreign" && !isolated) {
   process.stderr.write(process.env.FAKE_ENGINE_STDERR + "\\n");
@@ -195,6 +216,34 @@ test("managed engine v1 does not retry when no private storage is offered", asyn
       env: world.env,
     })).rejects.toThrow(/has no session table/);
     expect(await world.spawns()).toHaveLength(1);
+  } finally {
+    await rm(join(world.cwd, ".."), { recursive: true, force: true });
+  }
+});
+
+test("managed engine v1 applies both recoveries when a startup needs both", async () => {
+  const world = await harness("foreign-then-port", FOREIGN_STORAGE_STDERR);
+  try {
+    const server = await createManagedOpencodeServer({
+      bin: world.bin,
+      cwd: world.cwd,
+      stateDir: world.stateDir,
+      env: world.env,
+    });
+    try {
+      const spawns = await world.spawns();
+      expect(spawns).toHaveLength(3);
+      // Spawn 1 hit the colliding shared store.
+      expect(spawns[0]?.OPENCODE_DB).toBeUndefined();
+      // Spawn 2 recovered onto private storage but lost the race for its port.
+      expect(spawns[1]?.OPENCODE_DB).toBe(join(world.stateDir, "foreign-storage", "opencode.db"));
+      // Spawn 3 kept the private storage AND was handed a different port.
+      expect(spawns[2]?.OPENCODE_DB).toBe(join(world.stateDir, "foreign-storage", "opencode.db"));
+      expect(spawns[2]?.PORT).toBeDefined();
+      expect(spawns[2]?.PORT).not.toBe(spawns[1]?.PORT);
+    } finally {
+      await server.close();
+    }
   } finally {
     await rm(join(world.cwd, ".."), { recursive: true, force: true });
   }

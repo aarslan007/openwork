@@ -333,23 +333,28 @@ export async function createManagedOpencodeServer(options: ManagedOpencodeServer
   const hostname = options.hostname ?? "127.0.0.1";
   let port = options.port ?? await findFreePort(hostname, options.excludedPorts);
   let env = options.env;
-  // At most one recovery attempt, and only for a failure the retry can fix.
-  for (let attempt = 0; ; attempt += 1) {
+  // Each recovery is one-shot per class rather than per startup, so a machine
+  // that needs both gets both. A single shared budget would let whichever
+  // failure arrived first consume the only retry and strand the second.
+  const retried = new Set<"port" | "storage">();
+
+  for (;;) {
     try {
       return await startManagedOpencodeServer({ ...options, env }, hostname, port);
     } catch (error) {
-      if (attempt > 0) throw error;
       // The automatic free-port probe is necessarily racy. Retry exactly once
       // on the one startup failure a new port can safely fix; explicit ports
       // and all other code-1 exits remain actionable.
-      if (options.port === undefined && isRetryableAddressInUseExit(error)) {
+      if (options.port === undefined && !retried.has("port") && isRetryableAddressInUseExit(error)) {
+        retried.add("port");
         port = await findFreePort(hostname, [...(options.excludedPorts ?? []), port]);
         continue;
       }
       // A newer standalone opencode owns the storage engine v1 defaults to.
       // Private storage is safe to retry on: it is an unused store, so the
       // retry reuses nothing the failed attempt wrote.
-      if (options.stateDir && isForeignStorageExit(error)) {
+      if (options.stateDir && !retried.has("storage") && isForeignStorageExit(error)) {
+        retried.add("storage");
         env = { ...(options.env ?? {}), ...(await isolatedEngineStorageEnv(options.stateDir)) };
         continue;
       }
